@@ -1,0 +1,407 @@
+#count duplicate -SQL
+SELECT
+  SUM(c) as total_records 
+  , SUM(case when c>1 THEN c-1 ELSE 0 END) AS total_dupes 
+  , COUNT(*) AS total_uniques 
+FROM( 
+  SELECT
+    count(*) AS c
+  FROM
+    housing
+  GROUP BY
+    serialno, state 
+) dupes 
+; 
+#JOIN Stat -SQL
+SELECT
+  c.gender
+  , AVG(o.item_price) AS avg_price 
+FROM
+  ddemo.order_lineitems o 
+JOIN
+  ddemo.customers_dim c 
+   ON o.customer_id = c.customer_id 
+GROUP BY c.gender 
+;
+
+#SQL-munging 
+SELECT 
+   SUM(cte1.item_price), 
+   cte1.product_category_name
+FROM 
+(
+SELECT 
+   ol.*,
+   cd.gender
+FROM 
+   ddemo.order_lineitems ol,
+   ddemo.customers_dim cd
+WHERE 
+    ol.customer_id = cd.customer_id and cd.gender = 'F') cte1
+
+GROUP BY 
+    cte1.product_category_name
+ORDER BY 
+    1 DESC LIMIT 6
+;
+
+#SQL-extraction
+CREATE TABLE housing_nodupes AS
+SELECT 
+  DISTINCT ON (serialno, state) * 
+FROM 
+  housing 
+DISTRIBUTED BY(serialno, state)
+;
+#SQL -Extraction
+
+SELECT
+  serialno
+  , hinc
+  , rooms 
+FROM
+  housing_nodupes 
+WHERE 
+  hinc  > 0
+       AND state = 25
+;
+
+#SQL- Extraction
+
+SELECT 
+  educ AS Education_Level
+  , SUM(white) AS White 
+  , SUM(black) AS Black 
+  , SUM(aian) AS American_Indian_Alaska_Native 
+  , SUM(asian) AS Asian
+  , SUM(nhpi) AS Hawaii_Pacific_Islander
+  , SUM(other) AS Others 
+FROM
+  persons 
+WHERE
+  age > 17
+  AND educ > 0 
+GROUP BY educ 
+ORDER BY educ
+;
+
+##K-means -SQL -Madlib
+DROP TABLE IF EXISTS myschema.data;
+DROP TABLE IF EXISTS madlib.km_p;
+DROP TABLE IF EXISTS madlib.km_c;
+CREATE  TABLE 
+   myschema.data (
+        pid INT, 
+        position FLOAT8[]) 
+   DISTRIBUTED BY (pid);
+
+INSERT INTO myschema.data (pid, position[1])
+SELECT 
+   h.state  
+   ,round(avg(h.hinc),0) 
+FROM
+   housing h 
+WHERE 
+   (h.hinc > 0 )
+GROUP BY
+   h.state;
+
+
+--SELECT * FROM myschema.data;
+
+SET SEARCH_PATH to madlib,public,myschema;
+
+SELECT madlib.kmeans_random('myschema.data', 'position', null, 'km_p', 'km_c', 
+        'l2norm', 15,0.001,True, True, 6);
+
+SELECT * FROM madlib.km_c;
+SELECT * FROM madlib.km_p;
+
+
+## Kmeans SQL -madlib
+DROP TABLE income_state;
+CREATE TABLE income_state AS
+SELECT 
+   f.name state,  
+   round(avg(h.hinc),0) AS income  
+FROM
+   housing h 
+JOIN
+   fips f
+ON
+   h.state = f.code
+WHERE 
+   (h.hinc > 0 )
+GROUP BY
+    f.name
+ DISTRIBUTED BY (income); 
+
+##SQL -Madlib Liner regresion
+DROP TABLE IF EXISTS zeta1;
+CREATE TABLE zeta1 (
+     depvar FLOAT8,
+     indepvar FLOAT8[] 
+) DISTRIBUTED BY (depvar);
+     
+INSERT INTO zeta1(
+           depvar,indepvar[1],indepvar[2],indepvar[3],indepvar[4])
+SELECT
+    ln(meanhouseholdincome + 1),
+    1,
+    CASE WHEN sex = 'M'  THEN 0
+            WHEN sex = 'F' THEN 1
+         END AS  sex,
+     meanage,
+     meanemployment
+FROM
+     zeta;
+
+
+SET SEARCH_PATH to madlib,public,myschema;
+SELECT (linregr(depvar,indepvar)).r2 FROM zeta1;
+SELECT (linregr(depvar,indepvar)).coef FROM zeta1;
+SELECT (linregr(depvar,indepvar)).std_err FROM zeta1;
+SELECT (linregr(depvar,indepvar)).t_stats FROM zeta1;
+SELECT (linregr(depvar,indepvar)).p_values FROM zeta1;
+
+
+
+## SQl-Naiive Bayes-MAdlib FUnction 
+DROP TABLE IF EXISTS myschema.NBmdlib;
+CREATE TABLE myschema.NBmdlib (
+     attr INTEGER[],
+     class INTEGER )
+     DISTRIBUTED BY (class);
+INSERT INTO myschema.NBmdlib (attr[1],attr[2],attr[3],class)
+SELECT   
+     t1.age age,
+     t1.sex sex,
+     t1.educ educ ,
+     t1.income income
+FROM 
+     (
+     SELECT 
+         CASE 
+            WHEN inctot BETWEEN 10000 AND 50000 THEN 1 
+            WHEN inctot BETWEEN  50000+1 AND 80000 THEN 2
+            WHEN inctot > 80000  THEN 3
+                ELSE 0
+           END income ,
+          CASE 
+            WHEN age BETWEEN 20 AND 30 THEN 1
+            WHEN age BETWEEN 31 AND 45 THEN 2
+            WHEN age > 45 THEN 3
+                ELSE 0      
+          END age, 
+         CASE WHEN sex = 1  THEN 1
+            WHEN sex = 2 THEN 2
+             ELSE 0
+         END  sex,
+         CASE WHEN educ >14 THEN 1
+            WHEN educ BETWEEN 12 AND 14 THEN 2
+            WHEN educ <12 THEN 3
+              ELSE 0
+         END educ
+FROM 
+    persons) AS t1
+
+WHERE 
+   not (income = 0 OR age = 0 OR sex = 0)
+;
+
+DROP TABLE IF EXISTS myschema.nb_feature_probs;
+DROP TABLE IF EXISTS myschema.nb_class_priors;
+SELECT madlib.create_nb_prepared_data_tables( 
+'myschema.NBmdlib', 'class', 'attr', 3, 'myschema.nb_feature_probs', 'myschema.nb_class_priors');
+SELECT * FROM myschema.nb_feature_probs;
+SELECT * FROM myschema.nb_class_priors;
+
+
+DROP TABLE IF EXISTS myschema.NBmdlib_test;
+CREATE TABLE myschema.NBmdlib_test (
+     id SERIAL,
+     attr INTEGER[],
+     original_data INTEGER
+     ) DISTRIBUTED BY (id);
+INSERT INTO myschema.NBmdlib_test (attr[1],attr[2],attr[3],original_data)
+SELECT       
+     t1.age 
+     ,t1.sex 
+     ,t1.educ 
+     ,t1.income income
+FROM 
+     (
+     SELECT 
+         CASE 
+            WHEN inctot BETWEEN 10000 AND 50000 THEN 1 
+            WNEN inctot BETWEEN  50000+1 AND 80000 THEN 2
+            WNEN inctot > 80000  THEN 3
+                ELSE 0
+           END income ,
+          CASE 
+            WHEN age BETWEEN 20 AND 30 THEN 1
+            WHEN age BETWEEN 31 AND 45 THEN 2
+            WHEN age > 45 THEN 3
+                ELSE 0      
+          END age, 
+         CASE WHEN sex = 1  THEN 1
+            WHEN sex = 2 THEN 2
+             ELSE 0
+         END  sex,
+         CASE WHEN educ >14 THEN 1
+            WHEN educ BETWEEN 12 AND 14 THEN 2
+            WHEN educ <12 THEN 3
+              ELSE 0
+         END educ
+FROM 
+    persons) t1
+
+WHERE 
+   NOT (income = 0 OR age = 0 OR sex = 0)
+ORDER BY RANDOM ()
+LIMIT 10 
+;
+
+SELECT * from myschema.NBmdlib_test ORDER BY id;
+
+DROP TABLE IF EXISTS myschema.nb_classify_view_fast;
+DROP TABLE IF EXISTS myschema.nb_probs_view_fast;
+
+SELECT madlib.create_nb_classify_view (
+'myschema.nb_feature_probs', 'myschema.nb_class_priors', 'myschema.NBmdlib_test', 'id', 'attr', 3, 'myschema.nb_classify_view_fast');
+SELECT * FROM myschema.nb_classify_view_fast ORDER BY key;
+SELECT madlib.create_nb_probs_view (
+'myschema.nb_feature_probs', 'myschema.nb_class_priors', 'myschema.NBmdlib_test', 'id', 'attr', 3, 'myschema.nb_probs_view_fast');
+SELECT * FROM myschema.nb_probs_view_fast ORDER BY key,class;
+
+
+
+
+
+
+#########use of greenplum ,windows function, madlib -specific to EMC lab
+
+##Logit 
+DROP TABLE IF EXISTS logr_coef;
+CREATE TABLE logr_coef AS
+SELECT 0::INT AS bla, NULL::FLOAT8[] AS coef
+DISTRIBUTED BY (bla); 
+UPDATE logr_coef SET coef = (SELECT coef FROM madlib.logregr('artificiallogreg', 'y', 'x', 20, 'irls', 0.001) AS coef);
+
+\a 
+\o  graphics.txt
+SELECT DISTINCT rank::FLOAT8/total_count AS x, count::FLOAT8/total_true AS y
+FROM (
+    SELECT
+        y,
+        rank() OVER (ORDER BY prediction DESC),
+        count(*) OVER () total_count,
+        count(*) FILTER (WHERE y = TRUE) OVER (ORDER BY prediction DESC),
+        count(*) FILTER (WHERE y = TRUE) OVER () AS total_true
+    FROM (
+        SELECT r.*, 1. / (1. + exp(-dotProduct(r.x, c.coef))) AS prediction
+        FROM artificiallogreg AS r
+             CROSS JOIN
+           logr_coef as c
+    ) q
+) p;
+\o
+
+
+#median
+SELECT 
+    f.name,  ( arr[ length/2 + 1 ] + arr[ (length + 1)/2 ] ) / 2.0 AS median_income FROM
+    (SELECT state AS s, array_agg(hinc ORDER BY hinc) AS arr, count(*) AS length 
+     FROM housing 
+     GROUP BY state
+     ) AS q
+JOIN
+   fips f
+ON
+   s = f.code
+
+ORDER BY
+    f.name;
+
+ 
+
+
+
+
+#median1
+SELECT 
+  ( arr[ length/2 + 1 ] + arr[ (length + 1)/2 ] ) / 2.0 AS median_income 
+FROM(
+  SELECT 
+    array_agg(hinc ORDER BY hinc) AS arr
+  , count(*) AS length 
+  FROM 
+    housing
+ ) AS q
+;
+
+##SQL process for Clickstream step4
+SELECT sid from
+(
+    SELECT sid, page_type, time,
+        clickpath(
+            upper(substring(page_type for 1)),
+            '^SAH+B'
+        ) OVER (prefix) AS match,
+        count(*) OVER (prefix) AS seq_length,
+        count(*) OVER (PARTITION BY sid) AS max_seq_length
+    FROM clicks
+    WINDOW prefix AS (PARTITION BY sid ORDER BY time ASC)
+) AS subq
+WHERE seq_length = max_seq_length AND match = true;
+
+
+## SQL process for clieckstream step5
+DROP TYPE IF EXISTS clickstream_state CASCADE;
+CREATE TYPE clickstream_state AS (
+    sequence VARCHAR,
+    pattern VARCHAR
+);
+
+
+##SQl proc step6
+DROP AGGREGATE IF EXISTS clickpath(/* Symbol */ CHAR, /* regex */ TEXT);
+CREATE AGGREGATE clickpath(/* Symbol */ CHAR, /* regex */ TEXT) (
+    STYPE = clickstream_state, 
+    SFUNC = clickpath_transition,
+    FINALFUNC = clickpath_final,
+    PREFUNC = window_exclusion
+);
+
+
+##SQL proc for clieck stream step7 
+CREATE OR REPLACE FUNCTION window_exclusion(clickstream_state, clickstream_state)
+RETURNS clickstream_state AS $$ 
+BEGIN
+    RAISE EXCEPTION 'aggregate may only be called from a window function';
+END;
+$$ LANGUAGE PLPGSQL STRICT;
+
+
+
+#SQl cmds for step8 
+
+CREATE OR REPLACE FUNCTION clickpath_final(state clickstream_state)
+RETURNS BOOLEAN AS $$
+    SELECT $1.sequence ~ $1.pattern;
+$$ LANGUAGE SQL STRICT;
+
+
+#step 9 
+
+CREATE OR REPLACE FUNCTION clickpath_transition(
+    state clickstream_state, symbol CHAR(1), pattern VARCHAR)
+RETURNS clickstream_state AS $$
+    SELECT CASE
+        WHEN $1 IS NULL THEN ($2, $3)::clickstream_state
+        ELSE ($1.sequence || $2, $3)::clickstream_state
+    END;
+$$ LANGUAGE SQL CALLED ON NULL INPUT;
+
+
+
